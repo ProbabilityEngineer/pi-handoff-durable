@@ -38,7 +38,7 @@ Defaults are `handoffThreshold: 0.80`, `persistHandoff: true`, `.pi/handoff.md`,
 
 ### Proactive threshold
 
-The extension watches `turn_end`. The first turn whose measured usage reaches the configured threshold generates one handoff and schedules the normal fresh-session flow. It does not repeatedly prompt on later turns. The latch resets after a handoff, a proper new session, or a context compaction/reset.
+The extension watches `turn_end`. The first turn whose measured usage reaches the configured threshold records the crossing; handoff generation waits until `agent_settled`, after all retries and queued work finish, so the summary reflects the latest context. Compaction is cancelled while this proactive handoff is pending. It does not repeatedly prompt on later turns. The latch resets after a handoff, a proper new session, context compaction/reset, or a failed handoff attempt.
 
 This occurs before Pi's normal autocompaction so the model has more context available for a useful summary. It does not itself compact the old session.
 

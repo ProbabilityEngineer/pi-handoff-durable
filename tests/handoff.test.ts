@@ -204,10 +204,36 @@ describe("Handoff extension", () => {
 			expect(extension.handlers.has("context")).toBe(true);
 			expect(extension.handlers.has("input")).toBe(true);
 			expect(extension.handlers.has("agent_end")).toBe(true);
+			expect(extension.handlers.has("agent_settled")).toBe(true);
 			expect(extension.handlers.has("before_agent_start")).toBe(true);
 			expect(extension.handlers.has("session_before_compact")).toBe(true);
 			expect(extension.commands.has("handoff")).toBe(true);
 			expect(extension.tools.has("handoff")).toBe(true);
+		});
+	});
+
+	// ── Proactive threshold/compaction coordination ──────────────────────────
+
+	describe("proactive threshold/compaction coordination", () => {
+		it("cancels compaction after a threshold crossing until the run settles", async () => {
+			const { extension } = loadExtension();
+			const ui = createMockUI();
+			const ctx: any = {
+				hasUI: true,
+				model: { id: "test-model" },
+				ui,
+				cwd: tempDir,
+				getContextUsage: () => ({ tokens: 800, contextWindow: 1000, percent: 80 }),
+			};
+
+			await extension.handlers.get("turn_end")![0]({ type: "turn_end" }, ctx);
+			const result = await extension.handlers.get("session_before_compact")![0](
+				{ type: "session_before_compact", preparation: {} },
+				ctx,
+			);
+
+			expect(result).toEqual({ cancel: true });
+			expect(ui.select).not.toHaveBeenCalled();
 		});
 	});
 

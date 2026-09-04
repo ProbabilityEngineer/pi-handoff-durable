@@ -447,39 +447,21 @@ export default function (pi: ExtensionAPI) {
 		resetThreshold(thresholdState);
 	});
 
-	// ── turn_end: proactive threshold handoff ───────────────────────────────
+	// ── turn_end: record proactive threshold crossing ─────────────────────────
 	pi.on("turn_end", async (_event, ctx) => {
 		if (!ctx.hasUI || !ctx.model || pendingHandoff) return;
 		const config = loadHandoffConfig(getContextCwd(ctx));
 		if (!evaluateThreshold(thresholdState, ctx.getContextUsage(), config.handoffThreshold)) return;
 
-		const conv = gatherConversation(ctx);
-		if (!conv) return;
-		const result = await generateHandoffPrompt(conv.text, "Continue current work", ctx);
-		if (!result) {
-			ctx.ui.notify("Automatic handoff cancelled. The threshold will not prompt again this session.", "warning");
-			return;
-		}
-		if (result.type === "error") {
-			ctx.ui.notify(`Automatic handoff failed: ${result.message}`, "error");
-			return;
-		}
-		const prepared = await prepareHandoff(result.text, conv.messages, ctx.sessionManager.getSessionFile() ?? null, ctx);
-		if (prepared.type === "error") {
-			ctx.ui.notify(`Automatic handoff failed: ${prepared.message}`, "error");
-			return;
-		}
-		activeFileMarkers = prepared.fileMarkers;
-		pendingHandoff = {
-			prompt: prepared.displayPrompt,
-			parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
-		};
-		ctx.ui.notify(`Context crossed ${Math.round(config.handoffThreshold * 100)}%; handoff ready after this turn.`, "warning");
+		ctx.ui.notify(
+			`Context crossed ${Math.round(config.handoffThreshold * 100)}%; handoff will be prepared when the current run settles.`,
+			"warning",
+		);
 	});
 
-	// ── agent_end: deferred session switch for tool path ────────────────────
-	pi.on("agent_end", (_event, ctx) => {
-		if (!pendingHandoff) return;
+	// ── pending handoff application ──────────────────────────────────────────
+	const applyPendingHandoff = (ctx: ExtensionContext): boolean => {
+		if (!pendingHandoff) return false;
 
 		const { prompt, parentSession } = pendingHandoff;
 		pendingHandoff = null;
@@ -495,6 +477,48 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Handoff ready — edit if needed, press Enter to send", "info");
 			}
 		}, 0);
+		return true;
+	};
+
+	// ── agent_settled: generate proactive handoff from final current context ──
+	pi.on("agent_settled", async (_event, ctx) => {
+		if (!ctx.hasUI || !ctx.model || !thresholdState.crossed || pendingHandoff) return;
+
+		const conv = gatherConversation(ctx);
+		if (!conv) {
+			resetThreshold(thresholdState);
+			return;
+		}
+		const result = await generateHandoffPrompt(conv.text, "Continue current work", ctx);
+		if (!result) {
+			resetThreshold(thresholdState);
+			ctx.ui.notify("Automatic handoff cancelled. The threshold will not prompt again this session.", "warning");
+			return;
+		}
+		if (result.type === "error") {
+			resetThreshold(thresholdState);
+			ctx.ui.notify(`Automatic handoff failed: ${result.message}`, "error");
+			return;
+		}
+
+		const prepared = await prepareHandoff(result.text, conv.messages, ctx.sessionManager.getSessionFile() ?? null, ctx);
+		if (prepared.type === "error") {
+			resetThreshold(thresholdState);
+			ctx.ui.notify(`Automatic handoff failed: ${prepared.message}`, "error");
+			return;
+		}
+
+		activeFileMarkers = prepared.fileMarkers;
+		pendingHandoff = {
+			prompt: prepared.displayPrompt,
+			parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
+		};
+		applyPendingHandoff(ctx);
+	});
+
+	// ── agent_end: deferred session switch for tool path ────────────────────
+	pi.on("agent_end", (_event, ctx) => {
+		applyPendingHandoff(ctx);
 	});
 
 	// ── before_agent_start: system prompt hint ──────────────────────────────
@@ -506,6 +530,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (!ctx.hasUI || !ctx.model) return;
 
+		// A proactive threshold has fired, but its summary must wait for the
+		// current run to settle so it cannot describe stale work. Do not allow
+		// Pi to compact while that handoff is pending.
+		if (thresholdState.crossed || pendingHandoff) {
+			ctx.ui.notify("Handoff is being prepared from the latest context; compaction cancelled.", "warning");
+			return { cancel: true };
+		}
+
 		const usage = ctx.getContextUsage();
 		const pctStr = usage?.percent != null ? `${Math.round(usage.percent)}%` : "high";
 
@@ -513,10 +545,8 @@ export default function (pi: ExtensionAPI) {
 			`Context is ${pctStr} full. What would you like to do?`,
 			["Handoff to new session", "Compact context", "Continue without either"],
 		);
-
 		if (choice === "Compact context" || choice === undefined) return;
 		if (choice === "Continue without either") return { cancel: true };
-
 		// Build context from preparation data
 		const { preparation } = event;
 		const conversationText = serializeConversation(
