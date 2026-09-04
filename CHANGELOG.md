@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 - Proactive configurable handoff at 70% context usage.
 - Atomic repo-local handoff persistence at `.pi/handoff.md` with archived history under `.pi/handoffs/`.
 
+### Changed
+- Migrated Pi package imports and peer dependencies to the current `@earendil-works` namespace and `typebox` package.
+
 ## [1.3.1] - 2026-03-30
 ### Fixed
 - Updated to `getApiKeyAndHeaders()` API (pi-coding-agent 0.64.0 compatibility — `getApiKey` was removed).

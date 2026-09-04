@@ -15,21 +15,18 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@mariozechner/pi-agent-core";
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import {
 	AgentSession,
-	AuthStorage,
+	createAgentSession,
 	createExtensionRuntime,
 	type Extension,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
-	ModelRegistry,
 	SessionManager,
-	SettingsManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 // Import the real extension and its system prompt
 import handoffExtension, { SYSTEM_PROMPT } from "../extensions/handoff.ts";
@@ -40,13 +37,14 @@ import handoffExtension, { SYSTEM_PROMPT } from "../extensions/handoff.ts";
 
 /**
  * Resolve API key from pi's auth storage (~/.pi/agent/auth.json).
- * Handles both plain API keys and OAuth credentials (with refresh).
+ * Resolves plain API keys for optional e2e tests; OAuth credentials are skipped.
  */
 async function resolveApiKey(provider: string): Promise<string | undefined> {
 	const { homedir } = await import("node:os");
 	const { join } = await import("node:path");
 	const { existsSync, readFileSync } = await import("node:fs");
-	const { getOAuthApiKey } = await import("@mariozechner/pi-ai");
+	// OAuth credentials are not needed for the optional e2e tests.
+	// The current pi-ai namespace no longer exposes the legacy helper.
 
 	const authPath = join(homedir(), ".pi", "agent", "auth.json");
 	if (!existsSync(authPath)) return undefined;
@@ -62,18 +60,6 @@ async function resolveApiKey(provider: string): Promise<string | undefined> {
 	if (!entry) return undefined;
 
 	if (entry.type === "api_key") return entry.key;
-
-	if (entry.type === "oauth") {
-		const oauthCreds: Record<string, any> = {};
-		for (const [key, value] of Object.entries(storage)) {
-			if ((value as any).type === "oauth") {
-				const { type: _, ...creds } = value as any;
-				oauthCreds[key] = creds;
-			}
-		}
-		const result = await getOAuthApiKey(provider as any, oauthCreds);
-		return result?.apiKey;
-	}
 
 	return undefined;
 }
@@ -1463,30 +1449,14 @@ describe.skipIf(!API_KEY)("Handoff e2e (real LLM)", () => {
 		const { extension } = loadExtension();
 		const model = getModel("anthropic", "claude-haiku-4-5")!;
 		const sessionManager = SessionManager.create(tempDir);
-		const settingsManager = SettingsManager.create(tempDir, tempDir);
-		// Use pi's real auth storage so OAuth credentials are available
-		const { homedir } = await import("node:os");
-		const realAuthPath = join(homedir(), ".pi", "agent", "auth.json");
-		const authStorage = AuthStorage.create(realAuthPath);
-		const modelRegistry = new ModelRegistry(authStorage);
-
-		const agent = new Agent({
-			getApiKey: () => API_KEY!,
-			initialState: {
-				model,
-				systemPrompt: "Be concise.",
-				tools: [],
-			},
-		});
-
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settingsManager,
+		const sessionResult = await createAgentSession({
+			model,
 			cwd: tempDir,
-			modelRegistry,
-			resourceLoader: createTestResourceLoader([extension]),
+			noTools: "all",
+			sessionManager,
+			resourceLoader: createTestResourceLoader([extension]) as any,
 		});
+		session = sessionResult.session;
 
 		// Build conversation
 		await session.prompt("I'm building an OAuth2 authentication module in src/auth.ts. I've implemented the token exchange flow and refresh logic. The next step is adding PKCE support for public clients. Keep replies brief.");
@@ -1503,8 +1473,8 @@ describe.skipIf(!API_KEY)("Handoff e2e (real LLM)", () => {
 			custom: mock(async (factory: any) => {
 				// We can't run the real BorderedLoader in tests,
 				// but we CAN call complete() directly
-				const { complete: realComplete } = await import("@mariozechner/pi-ai");
-				const { buildSessionContext, convertToLlm, serializeConversation } = await import("@mariozechner/pi-coding-agent");
+				const { complete: realComplete } = await import("@earendil-works/pi-ai");
+				const { buildSessionContext, convertToLlm, serializeConversation } = await import("@earendil-works/pi-coding-agent");
 
 				// Use buildSessionContext (compaction-aware) — same as the real extension
 				const branch = sessionManager.getBranch();
