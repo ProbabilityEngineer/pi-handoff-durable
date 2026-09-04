@@ -24,6 +24,9 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { BorderedLoader, buildSessionContext, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { loadHandoffConfig } from "./handoff-config.ts";
+import { evaluateThreshold, createThresholdState, resetThreshold } from "./handoff-threshold.ts";
+import { persistHandoff } from "./handoff-storage.ts";
 
 // ---------------------------------------------------------------------------
 // System prompts
@@ -173,6 +176,42 @@ function expandFileMarkers(text: string, store: FileMarkerStore): string {
 // ---------------------------------------------------------------------------
 
 type HandoffResult = { type: "prompt"; text: string } | { type: "error"; message: string } | null;
+
+type PreparedHandoff = {
+	displayPrompt: string;
+	durablePrompt: string;
+	fileMarkers: FileMarkerStore;
+};
+
+function getContextCwd(ctx: ExtensionContext): string {
+	return ctx.cwd ?? (ctx.sessionManager as any).getCwd?.() ?? process.cwd();
+}
+
+/** Add parent/file context once, then persist that same canonical prompt. */
+async function prepareHandoff(
+	summary: string,
+	messages: any[],
+	parentSession: string | null,
+	ctx: ExtensionContext,
+): Promise<PreparedHandoff | { type: "error"; message: string }> {
+	const fileOps = buildFileOperations(messages);
+	const fileText = fileOps ? `\n\n${expandFileMarkers(fileOps.markers, fileOps.expansions)}` : "";
+	const displayBody = fileOps ? `${summary}\n\n${fileOps.markers}` : summary;
+	const displayPrompt = wrapWithParentSession(displayBody, parentSession);
+	const durablePrompt = wrapWithParentSession(`${summary}${fileText}`, parentSession);
+	const cwd = getContextCwd(ctx);
+	const config = loadHandoffConfig(cwd);
+
+	try {
+		await persistHandoff(cwd, durablePrompt, config);
+	} catch (error) {
+		return {
+			type: "error",
+			message: `Could not durably save handoff to ${config.handoffPath}: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	return { displayPrompt, durablePrompt, fileMarkers: fileOps?.expansions ?? new Map() };
+}
 
 /**
  * Generate a handoff prompt via LLM with a loader UI.
@@ -338,6 +377,7 @@ export default function (pi: ExtensionAPI) {
 
 	let pendingHandoff: { prompt: string; parentSession: string | undefined } | null = null;
 	let handoffTimestamp: number | null = null;
+	const thresholdState = createThresholdState();
 
 	// -- State for command path (full ctx.newSession() reset) -----------------
 	// Command path uses ctx.newSession() which fires session_switch properly.
@@ -351,8 +391,9 @@ export default function (pi: ExtensionAPI) {
 	// ── session_switch ──────────────────────────────────────────────────────
 	// Set editor text for command-path handoffs + clear context filter.
 	pi.on("session_switch", async (event, ctx) => {
-		// Any proper session switch clears the context filter
+		// Any proper session switch clears the context filter and threshold latch.
 		handoffTimestamp = null;
+		resetThreshold(thresholdState);
 
 		if (event.reason !== "new" || !ctx.hasUI) return;
 
@@ -401,12 +442,48 @@ export default function (pi: ExtensionAPI) {
 		return { action: "transform" as const, text: expanded, images: event.images };
 	});
 
+	// ── session_compact: reset threshold after context has shrunk ────────────
+	pi.on("session_compact", () => {
+		resetThreshold(thresholdState);
+	});
+
+	// ── turn_end: proactive threshold handoff ───────────────────────────────
+	pi.on("turn_end", async (_event, ctx) => {
+		if (!ctx.hasUI || !ctx.model || pendingHandoff) return;
+		const config = loadHandoffConfig(getContextCwd(ctx));
+		if (!evaluateThreshold(thresholdState, ctx.getContextUsage(), config.handoffThreshold)) return;
+
+		const conv = gatherConversation(ctx);
+		if (!conv) return;
+		const result = await generateHandoffPrompt(conv.text, "Continue current work", ctx);
+		if (!result) {
+			ctx.ui.notify("Automatic handoff cancelled. The threshold will not prompt again this session.", "warning");
+			return;
+		}
+		if (result.type === "error") {
+			ctx.ui.notify(`Automatic handoff failed: ${result.message}`, "error");
+			return;
+		}
+		const prepared = await prepareHandoff(result.text, conv.messages, ctx.sessionManager.getSessionFile() ?? null, ctx);
+		if (prepared.type === "error") {
+			ctx.ui.notify(`Automatic handoff failed: ${prepared.message}`, "error");
+			return;
+		}
+		activeFileMarkers = prepared.fileMarkers;
+		pendingHandoff = {
+			prompt: prepared.displayPrompt,
+			parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
+		};
+		ctx.ui.notify(`Context crossed ${Math.round(config.handoffThreshold * 100)}%; handoff ready after this turn.`, "warning");
+	});
+
 	// ── agent_end: deferred session switch for tool path ────────────────────
 	pi.on("agent_end", (_event, ctx) => {
 		if (!pendingHandoff) return;
 
 		const { prompt, parentSession } = pendingHandoff;
 		pendingHandoff = null;
+		resetThreshold(thresholdState);
 
 		handoffTimestamp = Date.now();
 		(ctx.sessionManager as any).newSession({ parentSession });
@@ -464,20 +541,24 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Build collapsed file markers from the messages being summarized
-		const fileOps = buildFileOperations(preparation.messagesToSummarize);
-		let prompt = fileOps
-			? `${handoffResult.text}\n\n${fileOps.markers}`
-			: handoffResult.text;
+		// Prepare and durably persist the exact prompt represented by the editor.
+		const currentSessionFile = ctx.sessionManager.getSessionFile();
+		const prepared = await prepareHandoff(
+			handoffResult.text,
+			preparation.messagesToSummarize,
+			currentSessionFile ?? null,
+			ctx,
+		);
+		if (prepared.type === "error") {
+			ctx.ui.notify(`Handoff failed: ${prepared.message}. Compacting instead.`, "warning");
+			return;
+		}
+		const prompt = prepared.displayPrompt;
 
 		// Switch session via raw sessionManager (safe — no agent loop running)
-		const currentSessionFile = ctx.sessionManager.getSessionFile();
-
-		// Wrap with parent session reference + session-query skill
-		prompt = wrapWithParentSession(prompt, currentSessionFile ?? null);
-
 		try {
 			handoffTimestamp = Date.now();
+			resetThreshold(thresholdState);
 			(ctx.sessionManager as any).newSession({ parentSession: currentSessionFile });
 		} catch (err) {
 			handoffTimestamp = null;
@@ -489,7 +570,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Activate markers for input hook expansion, then set editor text
-		if (fileOps) activeFileMarkers = fileOps.expansions;
+		activeFileMarkers = prepared.fileMarkers;
 		ctx.ui.setEditorText(prompt);
 		ctx.ui.notify("Handoff ready — edit if needed, press Enter to send", "info");
 
@@ -527,22 +608,18 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Build collapsed file markers from tool calls
-			const fileOps = buildFileOperations(conv.messages);
-			let prompt = fileOps
-				? `${result.text}\n\n${fileOps.markers}`
-				: result.text;
-
 			const currentSessionFile = ctx.sessionManager.getSessionFile();
-
-			// Wrap with parent session reference + session-query skill
-			prompt = wrapWithParentSession(prompt, currentSessionFile ?? null);
+			const prepared = await prepareHandoff(result.text, conv.messages, currentSessionFile ?? null, ctx);
+			if (prepared.type === "error") {
+				ctx.ui.notify(`Handoff failed: ${prepared.message}`, "error");
+				return;
+			}
 
 			if (currentSessionFile) {
-				pendingHandoffText.set(currentSessionFile, prompt);
+				pendingHandoffText.set(currentSessionFile, prepared.displayPrompt);
 			}
 			// Stage markers — they'll be activated in session_switch after editor text is set
-			const pendingMarkers = fileOps?.expansions;
+			const pendingMarkers = prepared.fileMarkers;
 
 			const sessionResult = await ctx.newSession({ parentSession: currentSessionFile ?? undefined });
 
@@ -553,7 +630,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Activate markers for the new session's input hook
-			if (pendingMarkers) activeFileMarkers = pendingMarkers;
+			activeFileMarkers = pendingMarkers;
+			resetThreshold(thresholdState);
 		},
 	});
 
@@ -588,20 +666,18 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text" as const, text: `Handoff failed: ${result.message}` }] };
 			}
 
-			const fileOps = buildFileOperations(conv.messages);
-			let prompt = fileOps
-				? `${result.text}\n\n${fileOps.markers}`
-				: result.text;
-
 			const currentSessionFile = ctx.sessionManager.getSessionFile();
-			prompt = wrapWithParentSession(prompt, currentSessionFile ?? null);
+			const prepared = await prepareHandoff(result.text, conv.messages, currentSessionFile ?? null, ctx);
+			if (prepared.type === "error") {
+				return { content: [{ type: "text" as const, text: `Handoff failed: ${prepared.message}` }] };
+			}
 
 			// Stage markers for activation after session switch
-			if (fileOps) activeFileMarkers = fileOps.expansions;
+			activeFileMarkers = prepared.fileMarkers;
 
 			// Defer session switch to agent_end
 			pendingHandoff = {
-				prompt,
+				prompt: prepared.displayPrompt,
 				parentSession: currentSessionFile ?? undefined,
 			};
 

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+### Added
+- Proactive configurable handoff at 70% context usage.
+- Atomic repo-local handoff persistence at `.pi/handoff.md` with archived history under `.pi/handoffs/`.
+
 ## [1.3.1] - 2026-03-30
 ### Fixed
 - Updated to `getApiKeyAndHeaders()` API (pi-coding-agent 0.64.0 compatibility — `getApiKey` was removed).

@@ -6,143 +6,74 @@
 pi install @ssweens/pi-handoff
 ```
 
-Context handoff extension for [pi](https://github.com/badlogic/pi-mono). Transfer context to a new session with a structured summary — three entry points, one UX.
+Context handoff extension for [pi](https://github.com/badlogic/pi-mono). Transfer context to a new session with a structured summary while preserving a durable repo-local recovery artifact.
+
+> This standalone fork is derived from [ssweens/pi-packages/pi-handoff](https://github.com/ssweens/pi-packages/tree/main/pi-handoff). Its proactive threshold behavior was informed by [ttiimmaahh/pi-handoff](https://github.com/ttiimmaahh/pi-handoff), and its durable generate/validate/atomic-write/reread approach was informed by [bernardofortes/pi-session-continuity](https://github.com/bernardofortes/pi-session-continuity). These projects are MIT-licensed; this implementation is original and does not copy their code.
 
 ## Features
 
 - **`/handoff <goal>`** — User-initiated context transfer to a focused new session
 - **Agent-callable tool** — The model can initiate handoffs when explicitly asked
-- **Auto-handoff on compaction** — Offered as an alternative when context gets full
-- **Parent session query** — `session_query` tool for looking up details from prior sessions
-- **Programmatic file tracking** — Read/modified files extracted from tool calls (same as pi's compaction)
-- **Structured format** — Aligned with pi's compaction format (Goal, Constraints, Progress, Key Decisions, Next Steps, Critical Context)
-- **System prompt hints** — The model knows about handoffs and suggests them proactively
+- **Proactive handoff** — At 70% context usage by default, prepares a handoff before Pi's normal autocompaction boundary
+- **Auto-handoff on compaction** — Offers a handoff when Pi is already compacting
+- **Durable artifacts** — Saves the exact handoff sent to the new session at `.pi/handoff.md` and archives each successful handoff under `.pi/handoffs/`
+- **Parent session query** — `session_query` can look up details from prior sessions
 
-## Installation
+## Configuration
 
-```bash
-pi install @ssweens/pi-handoff
+Project-local configuration is read from `.pi/handoff.json`:
+
+```json
+{
+  "handoffThreshold": 0.70,
+  "persistHandoff": true,
+  "handoffPath": ".pi/handoff.md",
+  "archiveHandoffs": true
+}
 ```
 
-## Usage
+Defaults are `handoffThreshold: 0.70`, `persistHandoff: true`, `.pi/handoff.md`, and archive enabled. Threshold usage is calculated from Pi's authoritative `ctx.getContextUsage()` token count divided by its active context-window size; this extension adds no character-count estimate. Pi may itself estimate trailing-message tokens when no provider usage is available. If Pi cannot provide both values, the proactive trigger waits for a usable measurement.
 
-### `/handoff <goal>`
+## Handoff behavior
 
-```
-/handoff now implement this for teams as well
-/handoff execute phase one of the plan
-/handoff check other places that need this fix
-```
+### Proactive threshold
 
-**What happens:**
-1. LLM generates a structured handoff prompt from your conversation
-2. New session opens
-3. Prompt appears in the editor for review
-4. Press Enter to send — agent starts working
+The extension watches `turn_end`. The first turn whose measured usage reaches the configured threshold generates one handoff and schedules the normal fresh-session flow. It does not repeatedly prompt on later turns. The latch resets after a handoff, a proper new session, or a context compaction/reset.
 
-### Agent-Initiated Handoff
+This occurs before Pi's normal autocompaction so the model has more context available for a useful summary. It does not itself compact the old session.
 
-Ask the model directly:
+### Manual and compaction handoffs
 
-```
-"Please hand this off to a new session"
-```
+`/handoff <goal>` and the agent `handoff` tool retain the original Sweens UX: generate a structured summary, open a fresh session, place the editable prompt in the editor, and let the user press Enter. The compaction hook still offers handoff, compact, or continue. The outgoing session remains intact in all cases.
 
-The agent calls the `handoff` tool. Session switch is deferred until the current turn completes, then the same flow: new session → prompt in editor → press Enter.
+Pi **compaction** summarizes an earlier portion of the current session to keep working in that session. A **fresh-session handoff** creates a separate session with a focused prompt. The **durable handoff artifact** is the on-disk copy used to make that transition recoverable; it is not a replacement for either session operation.
 
-### Auto-Handoff on Compaction
+### Durable persistence and failures
 
-When context gets full and auto-compaction triggers, you're offered a choice:
+Before a handoff transition proceeds, the canonical prompt is:
 
-```
-Context is 92% full. What would you like to do?
-> Handoff to new session
-  Compact context
-  Continue without either
-```
+1. generated once;
+2. augmented with parent-session and file-operation context;
+3. archived under `.pi/handoffs/` (when enabled);
+4. written to a temporary file;
+5. reread and verified;
+6. atomically renamed to `.pi/handoff.md`; and
+7. reread and verified again.
 
-Select "Handoff" → same flow: LLM generates prompt → new session → prompt in editor → press Enter. If you cancel or it fails, compaction proceeds as normal.
+The editor may show compact file markers, but its input hook expands them to the same canonical text persisted on disk. If directory creation, writing, rename, rereading, or verification fails, the user sees an error, the old session is preserved, and no automatic transition is performed. Manual recovery remains available. Generated artifacts can contain sensitive context; keep `.pi/handoff.md` and `.pi/handoffs/` out of version control as appropriate.
 
-### Querying Parent Sessions
+## Parent sessions
 
-Handoff prompts include a parent session reference:
+Handoff prompts include a parent session reference and ancestor chain:
 
-```
+```text
 /skill:pi-session-query
 
 **Parent session:** `/path/to/old-session.jsonl`
-
-## Goal
-...
 ```
 
-The `session_query` tool lets the model look up details from the parent session without loading the full conversation:
-
-```typescript
-session_query("/path/to/session.jsonl", "What files were modified?")
-session_query("/path/to/session.jsonl", "What approach was chosen?")
-```
-
-## Handoff Format
-
-Aligned with pi's compaction format, with programmatic file tracking appended:
-
-```markdown
-## Goal
-What the user wants to accomplish.
-
-## Constraints & Preferences
-- Requirements or preferences stated
-
-## Progress
-### Done
-- [x] Completed work
-
-### In Progress
-- [ ] Current work
-
-### Blocked
-- Open issues
-
-## Key Decisions
-- **Decision**: Rationale (path/to/file.ts:42)
-
-## Next Steps
-1. What should happen next
-
-## Critical Context
-- Data or references needed to continue
-
-<read-files>
-src/config.ts
-</read-files>
-
-<modified-files>
-src/handler.ts
-src/auth.ts
-</modified-files>
-```
-
-## Components
-
-| Component | Type | Description |
-|-----------|------|-------------|
-| [handoff.ts](extensions/handoff.ts) | Extension | `/handoff` command, `handoff` tool, compact hook, system prompt hints |
-| [session-query.ts](extensions/session-query.ts) | Extension | `session_query` tool for querying parent sessions |
-| [pi-session-query/](skills/pi-session-query/SKILL.md) | Skill | Instructions for using `session_query` |
-
-## Architecture
-
-Three entry points, one outcome:
-
-| Entry Point | Context Type | Session Creation |
-|-------------|-------------|-----------------|
-| `/handoff` command | `ExtensionCommandContext` | `ctx.newSession()` (full reset) |
-| `handoff` tool | `ExtensionContext` | Deferred to `agent_end` via raw `sessionManager.newSession()` |
-| Compact hook | `ExtensionContext` | Raw `sessionManager.newSession()` (no agent loop running) |
-
-All three end the same way: prompt in editor of new session → user presses Enter → agent starts.
+The `session_query` tool can query those `.jsonl` files without loading the full conversation into the active session.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
