@@ -14,7 +14,7 @@ Context handoff extension for [pi](https://github.com/badlogic/pi-mono). Transfe
 
 - **`/handoff <goal>`** — User-initiated context transfer to a focused new session
 - **Agent-callable tool** — The model can initiate handoffs when explicitly asked
-- **Proactive handoff** — At 70% context usage by default, prepares a handoff before Pi's normal autocompaction boundary
+- **Proactive handoff** — At 80% context usage by default, prepares a handoff before Pi's normal autocompaction boundary
 - **Auto-handoff on compaction** — Offers a handoff when Pi is already compacting
 - **Durable artifacts** — Saves the exact handoff sent to the new session at `.pi/handoff.md` and archives each successful handoff under `.pi/handoffs/`
 - **Parent session query** — `session_query` can look up details from prior sessions
@@ -25,14 +25,14 @@ Project-local configuration is read from `.pi/handoff.json`:
 
 ```json
 {
-  "handoffThreshold": 0.70,
+  "handoffThreshold": 0.80,
   "persistHandoff": true,
   "handoffPath": ".pi/handoff.md",
   "archiveHandoffs": true
 }
 ```
 
-Defaults are `handoffThreshold: 0.70`, `persistHandoff: true`, `.pi/handoff.md`, and archive enabled. Threshold usage is calculated from Pi's authoritative `ctx.getContextUsage()` token count divided by its active context-window size; this extension adds no character-count estimate. Pi may itself estimate trailing-message tokens when no provider usage is available. If Pi cannot provide both values, the proactive trigger waits for a usable measurement.
+Defaults are `handoffThreshold: 0.80`, `persistHandoff: true`, `.pi/handoff.md`, and archive enabled. Threshold usage is calculated from Pi's authoritative `ctx.getContextUsage()` token count divided by its active context-window size; this extension adds no character-count estimate. Pi may itself estimate trailing-message tokens when no provider usage is available. If Pi cannot provide both values, the proactive trigger waits for a usable measurement.
 
 ## Handoff behavior
 

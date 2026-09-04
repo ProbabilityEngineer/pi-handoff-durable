@@ -9,7 +9,7 @@ export interface HandoffConfig {
 }
 
 export const DEFAULT_HANDOFF_CONFIG: HandoffConfig = {
-	handoffThreshold: 0.70,
+	handoffThreshold: 0.80,
 	persistHandoff: true,
 	handoffPath: ".pi/handoff.md",
 	archiveHandoffs: true,

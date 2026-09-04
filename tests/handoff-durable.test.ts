@@ -16,11 +16,11 @@ afterEach(() => {
 });
 
 describe("proactive handoff threshold", () => {
-	it("does not trigger below 70% and triggers once at 70%", () => {
+	it("does not trigger below 80% and triggers once at 80%", () => {
 		const state = createThresholdState();
-		expect(evaluateThreshold(state, { tokens: 699, contextWindow: 1000 }, 0.7)).toBe(false);
-		expect(evaluateThreshold(state, { tokens: 700, contextWindow: 1000 }, 0.7)).toBe(true);
-		expect(evaluateThreshold(state, { tokens: 900, contextWindow: 1000 }, 0.7)).toBe(false);
+		expect(evaluateThreshold(state, { tokens: 799, contextWindow: 1000 }, 0.8)).toBe(false);
+		expect(evaluateThreshold(state, { tokens: 800, contextWindow: 1000 }, 0.8)).toBe(true);
+		expect(evaluateThreshold(state, { tokens: 900, contextWindow: 1000 }, 0.8)).toBe(false);
 	});
 
 	it("honors a configurable threshold and can reset", () => {
