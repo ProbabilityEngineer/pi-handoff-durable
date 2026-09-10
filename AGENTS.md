@@ -3,17 +3,14 @@
 ## Repository
 
 - This is a TypeScript Pi extension package using Bun.
-- Run the test suite with `bun test tests/` after installing dependencies.
 - Extensions live in `extensions/`; the `pi-session-query` skill lives in `skills/`.
+- Keep handoff and session-query output focused on durable context rather than duplicating transcripts.
 
-## Context discipline
+## Validation
 
-- Never recursively search `node_modules`, `.git`, build output, minified files, or vendored dependencies.
-- Prefer targeted searches with explicit paths and exclusions.
-- Use `read` with `offset`/`limit` for large files; avoid reading entire documentation files unless the task requires it.
-- Keep tool output focused and stop investigating once the question is answered.
+- Run `bun test tests/` after installing dependencies.
+- Use `bun test --watch tests/` only for interactive local development.
 
-## Local VCS
+## Version control
 
-- Use normal Git workflows for this repository; do not use jj/Jujutsu.
-- Inspect `git status` before starting and verify branch/remote alignment before declaring work clean or pushed.
+- Use normal Git workflows. Inspect `git status` and the diff before committing or pushing.
